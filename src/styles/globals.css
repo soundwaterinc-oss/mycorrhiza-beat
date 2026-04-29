@@ -1,0 +1,63 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #000305;
+  color: #00ff41;
+  font-family: 'Share Tech Mono', 'Courier New', monospace;
+  overflow-x: hidden;
+}
+
+.gt {
+  animation: gt 6s infinite;
+  font-family: 'Share Tech Mono', monospace;
+}
+
+@keyframes gt {
+  0%, 88%, 100% { text-shadow: none; transform: none; }
+  90% { text-shadow: -2px 0 #ff003c, 2px 0 #0ff; transform: skewX(-2deg); }
+  94% { clip-path: inset(35% 0 45% 0); color: #0ff; }
+  97% { clip-path: none; color: #00ff41; }
+}
+
+@keyframes scn {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+.scn {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: rgba(0, 255, 65, 0.025);
+  animation: scn 8s linear infinite;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+input[type='range'] {
+  accent-color: #00ff41;
+  cursor: pointer;
+}
+
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-thumb { background: #003300; }
+
+.btn {
+  background: transparent;
+  border: 1px solid;
+  font-family: 'Share Tech Mono', monospace;
+  cursor: pointer;
+  letter-spacing: 0.16em;
+  transition: all 0.1s;
+  padding: 6px 10px;
+  font-size: 9px;
+}
+
+.btn:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
