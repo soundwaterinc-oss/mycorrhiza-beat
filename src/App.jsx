@@ -68,6 +68,11 @@ export default function App() {
   const fxParamsRef  = useRef(fxParams);
   const dlyParamsRef = useRef(dlyParams);
   const sendLevelRef = useRef(sendLevel);
+  const observerBusRef = useRef(null);
+  const relayRef = useRef(null);
+  const relayAudioCtxRef = useRef(undefined);
+  const silenceTimerRef = useRef(null);
+  const playingRef = useRef(playing);
 
   // ── Scheduler refs (DOM-direct, zero React re-renders) ──
   const tmrRef  = useRef(null);
@@ -97,6 +102,7 @@ export default function App() {
   useEffect(() => { fxParamsRef.current  = fxParams;  }, [fxParams]);
   useEffect(() => { dlyParamsRef.current = dlyParams;  }, [dlyParams]);
   useEffect(() => { sendLevelRef.current = sendLevel;  }, [sendLevel]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
 
   // ── Generative RD ──
   const { dispRef: rdDispRef, gen: rdGen, getDataUrl: rdGetUrl } =
@@ -139,6 +145,13 @@ export default function App() {
   const buildAudio = async () => {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     ctxRef.current = ctx;
+    const observerBus = ctx.createGain();
+    observerBus.gain.value = 1;
+    const observerTap = ctx.createGain();
+    observerTap.gain.value = 0;
+    observerBus.connect(observerTap);
+    observerTap.connect(ctx.destination);
+    observerBusRef.current = observerBus;
 
     const fx  = createFX(ctx, ctx.destination);
     const dly = createMycorrhizaDelay(ctx, fx.input);
@@ -154,6 +167,7 @@ export default function App() {
       sendGains[t] = ctx.createGain(); sendGains[t].gain.value = 0;
       eng.outs[t].connect(dryGains[t]);
       eng.outs[t].connect(sendGains[t]);
+      eng.outs[t].connect(observerBus);
       dryGains[t].connect(ctx.destination);
       sendGains[t].connect(dly.input);
     });
@@ -169,6 +183,8 @@ export default function App() {
     const dp = dlyParamsRef.current;
     dly.setMix(dlyOn ? dp.mix : 0); dly.setPath(dp.path);
     dly.setAnastomosis(dp.anastomosis); dly.setGrowthRate(dp.growthRate);
+
+    registerMycorrhizaRelay(ctx, observerBus);
 
     return ctx;
   };
@@ -232,18 +248,43 @@ export default function App() {
     tmrRef.current = setTimeout(schedule, 15);
   }, []);
 
-  const togglePlay = async () => {
-    if (playing) {
-      clearTimeout(tmrRef.current); setPlay(false);
-      if (phRef.current)  { phRef.current.setAttribute('x1', '-10%');  phRef.current.setAttribute('x2', '-10%'); }
-      if (phGRef.current) { phGRef.current.setAttribute('x1', '-10%'); phGRef.current.setAttribute('x2', '-10%'); }
-      if (stepNumRef.current) stepNumRef.current.textContent = '';
-      return;
-    }
+  const stopPlayback = () => {
+    if (!playingRef.current) return;
+    clearTimeout(tmrRef.current);
+    clearTimeout(silenceTimerRef.current);
+    playingRef.current = false;
+    setPlay(false);
+    if (phRef.current)  { phRef.current.setAttribute('x1', '-10%');  phRef.current.setAttribute('x2', '-10%'); }
+    if (phGRef.current) { phGRef.current.setAttribute('x1', '-10%'); phGRef.current.setAttribute('x2', '-10%'); }
+    if (stepNumRef.current) stepNumRef.current.textContent = '';
+    silenceTimerRef.current = setTimeout(() => {
+      relayRef.current?.transport?.send({
+        t: 'silence',
+        from: 'mycorrhiza-beat',
+        since: 6,
+        at: Date.now(),
+      });
+    }, 6000);
+  };
+
+  const startPlayback = async () => {
+    if (playingRef.current) return;
+    clearTimeout(silenceTimerRef.current);
     if (!ctxRef.current) await buildAudio();
     if (ctxRef.current.state === 'suspended') await ctxRef.current.resume();
-    stpRef.current = 0; nxtRef.current = ctxRef.current.currentTime + 0.04;
-    schedule(); setPlay(true);
+    stpRef.current = 0;
+    nxtRef.current = ctxRef.current.currentTime + 0.04;
+    schedule();
+    playingRef.current = true;
+    setPlay(true);
+  };
+
+  const togglePlay = async () => {
+    if (playingRef.current) {
+      stopPlayback();
+      return;
+    }
+    await startPlayback();
   };
 
   // ── Scanner ──
@@ -289,9 +330,121 @@ export default function App() {
     if (key === 'growthRate')  d.setGrowthRate(val);
   };
 
+  function snapshotBridge() {
+    return {
+      bpm: bpmRef.current,
+      fxParams: { ...fxParamsRef.current },
+      dlyParams: { ...dlyParamsRef.current },
+      sendLevel: { ...sendLevelRef.current },
+      oscUrl,
+      playing: playingRef.current,
+    };
+  }
+
+  function applyBridgeParam(name, value) {
+    if (!name) return false;
+    if (name === 'bpm') {
+      setBpm(Math.round(+value || 0));
+      return true;
+    }
+    if (/^sendLevel\./.test(name)) {
+      const track = name.split('.')[1];
+      if (TRACK_KEYS.includes(track)) {
+        const next = Math.max(0, Math.min(1, +value || 0));
+        setSendLevel((prev) => ({ ...prev, [track]: next }));
+        const ctx = ctxRef.current;
+        const t = ctx?.currentTime ?? 0;
+        sendGainsRef.current[track]?.gain.setTargetAtTime(next, t, 0.02);
+        return true;
+      }
+    }
+    if (/^(fx|fxParams)\./.test(name)) {
+      const key = name.split('.')[1];
+      if (key in fxParamsRef.current) {
+        setFxParam(key, +value);
+        return true;
+      }
+    }
+    if (/^(dly|delay|dlyParams)\./.test(name)) {
+      const key = name.split('.')[1];
+      if (key in dlyParamsRef.current) {
+        setDlyParam(key, +value);
+        return true;
+      }
+    }
+    if (name in fxParamsRef.current) {
+      setFxParam(name, +value);
+      return true;
+    }
+    if (name in dlyParamsRef.current) {
+      setDlyParam(name, +value);
+      return true;
+    }
+    return false;
+  }
+
+  function applyPresetBridge(prefix, obj) {
+    Object.entries(obj || {}).forEach(([key, val]) => {
+      const full = prefix ? `${prefix}.${key}` : key;
+      if (val && typeof val === 'object' && !Array.isArray(val)) applyPresetBridge(full, val);
+      else applyBridgeParam(full, val);
+    });
+  }
+
+  function registerMycorrhizaRelay(ctx = null, outputNode = null) {
+    if (typeof window.registerElSystemaInstrument !== 'function') return;
+    if (relayRef.current && relayAudioCtxRef.current === ctx) return;
+    try { relayRef.current?.close?.(); } catch (_) {}
+    relayRef.current = window.registerElSystemaInstrument({
+      id: 'mycorrhiza-beat',
+      audioContext: ctx,
+      outputNode,
+      play: () => { startPlayback(); },
+      stop: () => { stopPlayback(); },
+      setParam: (name, value) => { applyBridgeParam(name, value); },
+      ramp: (name, from, to, dur) => {
+        const duration = Math.max(0.001, dur);
+        const start = performance.now();
+        const tick = () => {
+          const k = Math.min(1, (performance.now() - start) / 1000 / duration);
+          applyBridgeParam(name, from + (to - from) * k);
+          if (k < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      },
+      loadPreset: (preset) => {
+        if (!preset || typeof preset !== 'object') return;
+        applyPresetBridge('', preset);
+      },
+      snapshot: () => snapshotBridge(),
+    });
+    relayAudioCtxRef.current = ctx;
+    window.__mycorrhizaRelay = relayRef.current;
+  }
+
   useEffect(() => {
     if (dlyRef.current) dlyRef.current.setMix(dlyOn ? dlyParamsRef.current.mix : 0);
   }, [dlyOn]);
+
+  useEffect(() => {
+    registerMycorrhizaRelay();
+  }, []);
+
+  useEffect(() => {
+    window.__mycorrhiza_setParam = applyBridgeParam;
+    window.__mycorrhiza_snapshot = snapshotBridge;
+    return () => {
+      delete window.__mycorrhiza_setParam;
+      delete window.__mycorrhiza_snapshot;
+    };
+  });
+
+  useEffect(() => () => {
+    clearTimeout(silenceTimerRef.current);
+    try { relayRef.current?.close?.(); } catch (_) {}
+    relayRef.current = null;
+    relayAudioCtxRef.current = undefined;
+  }, []);
 
   // ── Dub Send ──
   const dubPointerDown = (track) => {
