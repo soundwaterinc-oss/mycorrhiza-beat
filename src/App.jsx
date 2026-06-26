@@ -69,6 +69,7 @@ export default function App() {
   const dlyParamsRef = useRef(dlyParams);
   const sendLevelRef = useRef(sendLevel);
   const observerBusRef = useRef(null);
+  const masterGainRef  = useRef(null);
   const relayRef = useRef(null);
   const relayAudioCtxRef = useRef(undefined);
   const silenceTimerRef = useRef(null);
@@ -153,7 +154,13 @@ export default function App() {
     observerTap.connect(ctx.destination);
     observerBusRef.current = observerBus;
 
-    const fx  = createFX(ctx, ctx.destination);
+    // Master gain stage — boosts the whole audible mix before the destination
+    const master = ctx.createGain();
+    master.gain.value = 1.4;
+    master.connect(ctx.destination);
+    masterGainRef.current = master;
+
+    const fx  = createFX(ctx, master);
     const dly = createMycorrhizaDelay(ctx, fx.input);
     fxRef.current  = fx;
     dlyRef.current = dly;
@@ -168,7 +175,7 @@ export default function App() {
       eng.outs[t].connect(dryGains[t]);
       eng.outs[t].connect(sendGains[t]);
       eng.outs[t].connect(observerBus);
-      dryGains[t].connect(ctx.destination);
+      dryGains[t].connect(master);
       sendGains[t].connect(dly.input);
     });
     dryGainsRef.current  = dryGains;
