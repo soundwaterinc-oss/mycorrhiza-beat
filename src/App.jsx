@@ -154,11 +154,25 @@ export default function App() {
     observerTap.connect(ctx.destination);
     observerBusRef.current = observerBus;
 
-    // Master gain stage — boosts the whole audible mix before the destination
-    // 1.4 (base boost) * 3.162 (+10 dB) ≈ 4.43
+    // Master chain — drive → compressor (limiter) → makeup → destination.
+    // Loudness comes from compression + makeup, not raw gain, so it stays
+    // hot without hard-clipping at the destination.
     const master = ctx.createGain();
-    master.gain.value = 4.43;
-    master.connect(ctx.destination);
+    master.gain.value = 2.2;                 // drive into the compressor
+
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18;              // start compressing early
+    comp.knee.value      = 6;
+    comp.ratio.value     = 12;               // limiter-ish
+    comp.attack.value    = 0.003;
+    comp.release.value   = 0.12;
+
+    const makeup = ctx.createGain();
+    makeup.gain.value = 2.0;                 // makeup gain after compression
+
+    master.connect(comp);
+    comp.connect(makeup);
+    makeup.connect(ctx.destination);
     masterGainRef.current = master;
 
     const fx  = createFX(ctx, master);
