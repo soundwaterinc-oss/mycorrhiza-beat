@@ -155,8 +155,9 @@ export default function App() {
     observerBusRef.current = observerBus;
 
     // Master gain stage — boosts the whole audible mix before the destination
+    // 1.4 (base boost) * 3.162 (+10 dB) ≈ 4.43
     const master = ctx.createGain();
-    master.gain.value = 1.4;
+    master.gain.value = 4.43;
     master.connect(ctx.destination);
     masterGainRef.current = master;
 
