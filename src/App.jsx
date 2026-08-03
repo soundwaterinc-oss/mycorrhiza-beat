@@ -14,6 +14,26 @@ import {
   blank, blankY, DEF_SENS, DEF_MAPS, yToMod,
 } from './constants.js';
 
+// 先読み地平。基調は太め、hidden 時はさらに広げる（hado-* 同型・§4.4）。
+const LOOKAHEAD = 0.5;         // 通常 500ms（旧 0.1 → worker 駆動で拡張）
+const LOOKAHEAD_HIDDEN = 1.5;  // タブ非表示時 1.5s
+const TICK_MS = 25;
+const FIELD_ON = /[?&#]field/.test(location.href);
+
+// Web Worker タイマーで scheduler を駆動する。main-thread の setTimeout は hidden タブで ≥1000ms に
+// 間引かれ、固定 lookahead を超えて発音が欠落する（E2E-7 stage-2a で実測反証: 起床453→1003ms/過去積み115/
+// 無音4.8s）。worker の setInterval は可聴再生中のページで throttle が緩和され背景でも継続する（hado clock.ts 同機構）。
+function makeWorkerClock(onTick) {
+  const src = "let id;onmessage=function(e){var d=e.data||{};if(d.type==='start'){clearInterval(id);id=setInterval(function(){postMessage(0)},d.interval||25)}else{clearInterval(id)}}";
+  let w = null, url = null, fb = null;
+  try { url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' })); w = new Worker(url); w.onmessage = onTick; } catch (_) { w = null; }
+  return {
+    start(interval) { if (w) w.postMessage({ type: 'start', interval }); else fb = setInterval(onTick, interval); },
+    stop() { if (w) w.postMessage({ type: 'stop' }); if (fb) { clearInterval(fb); fb = null; } },
+    dispose() { try { if (w) w.terminate(); if (url) URL.revokeObjectURL(url); } catch (_) {} },
+  };
+}
+
 export default function App() {
   // ── Pattern state ──
   const [pat, setPat]     = useState(blank());
@@ -70,6 +90,7 @@ export default function App() {
   const sendLevelRef = useRef(sendLevel);
   const observerBusRef = useRef(null);
   const masterGainRef  = useRef(null);
+  const fieldVolumeRef = useRef(1);
   const relayRef = useRef(null);
   const relayAudioCtxRef = useRef(undefined);
   const silenceTimerRef = useRef(null);
@@ -77,6 +98,7 @@ export default function App() {
 
   // ── Scheduler refs (DOM-direct, zero React re-renders) ──
   const tmrRef  = useRef(null);
+  const clockRef = useRef(null);   // Web Worker クロック（背景タブ耐性・§4.4）
   const stpRef  = useRef(0);
   const nxtRef  = useRef(0);
   const patRef  = useRef(pat);
@@ -173,7 +195,7 @@ export default function App() {
     master.connect(comp);
     comp.connect(makeup);
     makeup.connect(ctx.destination);
-    masterGainRef.current = master;
+    masterGainRef.current = makeup;
 
     const fx  = createFX(ctx, master);
     const dly = createMycorrhizaDelay(ctx, fx.input);
@@ -216,8 +238,9 @@ export default function App() {
     const ctx = ctxRef.current, eng = engRef.current;
     if (!ctx || !eng) return;
     const sps = 60 / bpmRef.current / 8;
+    const la = (typeof document !== 'undefined' && document.hidden) ? LOOKAHEAD_HIDDEN : LOOKAHEAD;
 
-    while (nxtRef.current < ctx.currentTime + 0.1) {
+    while (nxtRef.current < ctx.currentTime + la) {
       const s = stpRef.current, p = patRef.current, t = nxtRef.current;
       const ym = yRef.current, m = mapsRef.current;
       const gM = tr => yToMod(ym[tr]?.[s] ?? 0.5, m[tr]);
@@ -267,11 +290,12 @@ export default function App() {
       stpRef.current = (s + 1) % STEPS;
       nxtRef.current += sps;
     }
-    tmrRef.current = setTimeout(schedule, 15);
+    // 再武装は Web Worker クロックが担う（旧: setTimeout(schedule,15) は hidden で throttle された）。
   }, []);
 
   const stopPlayback = () => {
     if (!playingRef.current) return;
+    if (clockRef.current) clockRef.current.stop();
     clearTimeout(tmrRef.current);
     clearTimeout(silenceTimerRef.current);
     playingRef.current = false;
@@ -296,7 +320,9 @@ export default function App() {
     if (ctxRef.current.state === 'suspended') await ctxRef.current.resume();
     stpRef.current = 0;
     nxtRef.current = ctxRef.current.currentTime + 0.04;
-    schedule();
+    if (!clockRef.current) clockRef.current = makeWorkerClock(() => schedule());
+    schedule();                       // 初回だけ即 pump（低レイテンシ起動）
+    clockRef.current.start(TICK_MS);  // 以降は worker tick が駆動
     playingRef.current = true;
     setPlay(true);
   };
@@ -358,6 +384,9 @@ export default function App() {
       fxParams: { ...fxParamsRef.current },
       dlyParams: { ...dlyParamsRef.current },
       sendLevel: { ...sendLevelRef.current },
+      fxOn,
+      dlyOn,
+      volume: fieldVolumeRef.current,
       oscUrl,
       playing: playingRef.current,
     };
@@ -405,16 +434,43 @@ export default function App() {
     return false;
   }
 
+  function elsysMacro(name, value) {
+    const v = Math.max(0, Math.min(1, Number(value) || 0));
+    if (name === 'macro.a') {
+      setBpm(Math.round(80 + v * 120));
+      setFxParam('density', v);
+      setFxParam('anastomosis', v);
+    } else if (name === 'macro.b') {
+      setFxParam('character', v);
+      setFxParam('resonance', v);
+      setFxParam('age', v);
+    } else if (name === 'macro.c') {
+      setFxParam('mix', v);
+      setDlyParam('mix', v);
+      setDlyParam('path', v);
+    } else if (name === 'volume') {
+      fieldVolumeRef.current = v;
+      const ctx = ctxRef.current;
+      const gain = masterGainRef.current?.gain;
+      if (ctx && gain) gain.setTargetAtTime(v * v, ctx.currentTime, 0.02);
+    } else {
+      applyBridgeParam(name, value);
+    }
+  }
+
   function applyPresetBridge(prefix, obj) {
     Object.entries(obj || {}).forEach(([key, val]) => {
       const full = prefix ? `${prefix}.${key}` : key;
       if (val && typeof val === 'object' && !Array.isArray(val)) applyPresetBridge(full, val);
+      else if (full === 'volume') elsysMacro('volume', val);
+      else if (full === 'fxOn') setFxOn(!!val);
+      else if (full === 'dlyOn') setDlyOn(!!val);
       else applyBridgeParam(full, val);
     });
   }
 
   function registerMycorrhizaRelay(ctx = null, outputNode = null) {
-    if (typeof window.registerElSystemaInstrument !== 'function') return;
+    if (!FIELD_ON || typeof window.registerElSystemaInstrument !== 'function') return;
     if (relayRef.current && relayAudioCtxRef.current === ctx) return;
     try { relayRef.current?.close?.(); } catch (_) {}
     relayRef.current = window.registerElSystemaInstrument({
@@ -423,13 +479,13 @@ export default function App() {
       outputNode,
       play: () => { startPlayback(); },
       stop: () => { stopPlayback(); },
-      setParam: (name, value) => { applyBridgeParam(name, value); },
+      setParam: (name, value) => { elsysMacro(name, value); },
       ramp: (name, from, to, dur) => {
         const duration = Math.max(0.001, dur);
         const start = performance.now();
         const tick = () => {
           const k = Math.min(1, (performance.now() - start) / 1000 / duration);
-          applyBridgeParam(name, from + (to - from) * k);
+          elsysMacro(name, from + (to - from) * k);
           if (k < 1) requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
@@ -449,7 +505,7 @@ export default function App() {
   }, [dlyOn]);
 
   useEffect(() => {
-    registerMycorrhizaRelay();
+    if (FIELD_ON && !ctxRef.current) buildAudio().catch(console.error);
   }, []);
 
   useEffect(() => {
